@@ -9,8 +9,8 @@
 
 <channel>
 	<title>LCBC Equip Conference</title>
-	<atom:link href="https://echois03.github.io/lcbc-equip/feed/" rel="self" type="application/rss+xml" />
-	<link>https://echois03.github.io/lcbc-equip/</link>
+	<atom:link href="https://equip.lagunabaptist.org/feed/" rel="self" type="application/rss+xml" />
+	<link>https://equip.lagunabaptist.org/</link>
 	<description></description>
 	<lastBuildDate>Sat, 04 Mar 2023 06:46:28 +0000</lastBuildDate>
 	<language>en-US</language>
@@ -21,9 +21,9 @@
 	<generator>https://wordpress.org/?v=6.1.1</generator>
 
 <image>
-	<url>https://echois03.github.io/lcbc-equip/wp-content/uploads/2023/02/favicon.png</url>
+	<url>https://equip.lagunabaptist.org/wp-content/uploads/2023/02/favicon.png</url>
 	<title>LCBC Equip Conference</title>
-	<link>https://echois03.github.io/lcbc-equip/</link>
+	<link>https://equip.lagunabaptist.org/</link>
 	<width>32</width>
 	<height>32</height>
 </image> 
