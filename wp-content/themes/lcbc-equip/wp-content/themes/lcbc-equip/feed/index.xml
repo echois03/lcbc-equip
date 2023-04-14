@@ -9,21 +9,21 @@
 
 <channel>
 	<title>LCBC Equip Conference</title>
-	<atom:link href="https://equip.lagunabaptist.org/feed/" rel="self" type="application/rss+xml" />
-	<link>https://equip.lagunabaptist.org/</link>
+	<atom:link href="http://equip.lagunabaptist.org/feed/" rel="self" type="application/rss+xml" />
+	<link>http://equip.lagunabaptist.org/</link>
 	<description></description>
-	<lastBuildDate>Sat, 04 Mar 2023 06:46:28 +0000</lastBuildDate>
+	<lastBuildDate>Wed, 05 Apr 2023 21:45:19 +0000</lastBuildDate>
 	<language>en-US</language>
 	<sy:updatePeriod>
 	hourly	</sy:updatePeriod>
 	<sy:updateFrequency>
 	1	</sy:updateFrequency>
-	<generator>https://wordpress.org/?v=6.1.1</generator>
+	<generator>https://wordpress.org/?v=6.2</generator>
 
 <image>
-	<url>https://equip.lagunabaptist.org/wp-content/uploads/2023/02/favicon.png</url>
+	<url>http://equip.lagunabaptist.org/wp-content/uploads/2023/02/favicon.png</url>
 	<title>LCBC Equip Conference</title>
-	<link>https://equip.lagunabaptist.org/</link>
+	<link>http://equip.lagunabaptist.org/</link>
 	<width>32</width>
 	<height>32</height>
 </image> 
