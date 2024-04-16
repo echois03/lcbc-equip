@@ -1,10 +1,10 @@
 === Simply Static ===
 Contributors: patrickposner
 Tags: HTML, static website generator, static site, secure, fast
-Requires at least: 5.4
-Tested up to: 6.2
+Requires at least: 6.3
+Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 2.2.9
+Stable tag: 3.1.6.3
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -47,36 +47,15 @@ Develop your site locally and only push the static exported website on a server.
 
 I highly recommend not to use another tool for local development if you are not a programmer as in most cases manual package installation is required.
 
-== Simply CDN ==
-
-Simply CDN is a hosting platform for static sites generated with Simply Static.
-
-Create an account, copy & paste the Security Token into Simply Static, and immediately push your static website live.
-
-[youtube https://youtu.be/7ejlvDxXMXM]
-
-Simply CDN also ships with a bunch of features to simplify the process of working with your static website:
-
-* handles caching and security
-* temporary domains for setup and testing
-* forward form submissions to your e-mail address
-* handles 404 pages with a custom template
-* automatically export changes in the background
-
-It's built on BunnyCDN and combines affordable static site hosting with everything learned while developing Simply Static.
-
-Start your 7-day free trial [here](https://simplycdn.io/#pricing).
-
-
 == Simply Static Pro ==
 
 The pro version of Simply Static enhances the plugin with various features.
 
-[youtube https://www.youtube.com/watch?v=PwdO6B7Iet0]
+[youtube https://www.youtube.com/watch?v=PTuw1ChYCdI]
 
 = GitHub Integration =
 
-With the GitHub integration, you can completely automate your entire development process. 
+With the GitHub integration, you can completely automate your entire development process.
 
 The only thing you need is a GitHub account, no knowledge of Git or GitHub itself is required, as Simply Static Pro handles the entire process for you and keeps your repository up to date.
 
@@ -86,10 +65,17 @@ This allows deploying your static website to:
 * Cloudflare Pages
 * Netlify
 * Vercel
-* Amazon S3
-* Digital Ocean Spaces
-* BunnyCDN (and other CDN providers)
 * SFTP to your server
+
+
+= AWS S3 Integration =
+
+Export directly to Amazon AWS S3 from Simply Static Pro. Connect your bucket and run your export.
+
+
+= BunnyCDN Integration =
+
+Export directly to BunnyCDN and get all the benefits of their CDN - including caching, file optimization and DNS management.
 
 
 = Builds and Single Exports =
@@ -129,9 +115,46 @@ Use WPML, Polylang or TranslatePress and run static exports per language or all 
 Simply Static Pro also supports configuring settings per language, using the available language switchers and more to export a your multilingual website as easy as possible.
 
 
+= WP-CLI =
+
+Simply Static Pro has a detailed and comprehensive integration with WP-CLI.
+
+Control every option, run different kinds of exports and more with the WP-CLI integration.
+
+= Minification =
+
+Automatically minfiy HTML, CSS and JavaScript files on your static site.
+
+We can even minify inline CSS & JavaScript.
+
+= Optimization =
+
+Replace default WordPress paths and completely hide that you are using WordPress behind the scenes.
+
+Replace:
+
+* wp-content
+* wp-includes
+* wp-content/plugins/
+* wp-content/themes/
+* wp-content/uploads/
+
+
+Hide & Disable:
+
+Disabled unwanted features in WordPress before running an static export like:
+
+* XML-RPC
+* REST API URLs
+* Emoji support
+* Shortlink support
+* WordPress version in HTML
+
+and much more.
+
 = Get the Pro version =
 
-You can get the pro version [here](https://simplystatic.com/simply-static-pro/).
+You can get the pro version [here](https://simplystatic.com/pro/).
 
 = Tutorials =
 
@@ -199,6 +222,178 @@ Simply Static creates a static copy of your WordPress site that is intended to b
 3. Diagnostics
 
 == Changelog ==
+
+= 3.1.6.3 =
+
+* no more filesize limits on wp_remote_get()
+* removed empty settings page on network admin
+* improved various descriptions + added links to the documentation
+* added filter to set conditions before clearing local directory
+* avoid clearing special characters from Basic Auth credentials
+* auto-cancel export if Basic Auth is set and credentials don't match
+* improved default settings handling
+* extended plugin compatibility list up to 100 (from 30)
+* unified 404 page option for CDN exports
+
+= 3.1.6.2 =
+
+* new filter for extended DOM manipulation
+* fixed typos for optimization settings
+* exclude builds and single exports from clear directory
+
+= 3.1.6.1 =
+
+* modified default parameters for ss_remote_args filter (file size based on uploads limit)
+
+= 3.1.6 =
+
+* new multisite integration (network, import/export subsites)
+* improved 404 page handling
+* improved secure debug log handling
+* plugin compatibility database integration
+* admin UI improvements (labels, helper texts..)
+* updated translation files
+* improved version output in admin UI
+
+= 3.1.5 =
+
+* refactored additional settings
+* introduced setting for origin URL
+* removed unused helper methods
+* improved requests to itself check in diagnostics
+* improved sanitization for multiline fields
+* load textdomain in init hook instead of plugins_loaded
+* NPM packages updated to latest releases
+
+
+= 3.1.4 =
+
+* added log for replacing 404 pages
+* fix for 404 page in local directory exports
+* clear log before running new export to avoid big file sizes
+* extended ss_remote_args filter with async requests + max file size per request
+* improved sanitization for import/export settings
+* added filter for local URL check
+* improved secure log handling (dynamic filename + .htaccess rule)
+
+= 3.1.3 =
+
+* JS dependencies updated
+* refactored filter implementation for tasks
+* added check for empty strings in excludes
+* removed unused blog_id check
+* changed location of debug log to uploads dir
+* check for Rest API in diagnostics
+* increased PHP version for diagnostics >= 8.0
+* whitelist Freemius API calls if Basic Auth enabled
+
+= 3.1.2 =
+
+* WordPress 6.4 compatibility
+* Improved clearing logs
+* improved capability filter
+
+= 3.1.1 =
+
+* improved admin UI descriptions in general settings
+* added support for 404 pages
+* added error message to WP_Error when archive dir cannot be created
+* added add_status_message method to Simply_Static\Options for WP CLI handling
+
+= 3.1.0 =
+
+* fix for scheme/host when resetting settings
+* enhanced integration setups (GitHub objects)
+* fixed example for relative path setups in settings
+
+
+= 3.0.9 =
+
+* PHP 8.2 support improved
+* wp_parse_url instead of just parse_url for fetching URLs
+* enhanced default options
+* increased min WP version
+
+= 3.0.8 =
+
+* SimplyCDN auto include files
+* min WP version increased to 6.2
+* improved wording for progress in export log
+* improved Basic Auth handling
+* improved absolute URL replacement
+* Elementor integration: prevent replacing non strings in HTML
+
+
+= 3.0.7 =
+
+* SimplyCDN setting now in React Admin UI
+* filter for capabilities in Rest routes
+* SimplyCDN improvements for webhook handling
+
+
+= 3.0.6 =
+
+* removed type hints in Rest API abstraction for PHP 7.4 support
+* make sure we only trigger maybe_wp_die() if there is an error on export
+
+= 3.0.5 =
+
+* fixed incompatibility with EWWW image optimizer
+
+= 3.0.4 =
+
+* simplified url_exclude upgrade on update
+* disable browser autocomplete on basic auth settings
+* added additional notice with button in settings panel if all auto-migration fails
+
+= 3.0.3 =
+
+* specific version check for migration handler
+* fixed schema option updates
+
+= 3.0.2 =
+
+* fixed iterator for "clear_local_directory" option
+* reworked "force_replace_urls" to the new options patterns (boolean)
+
+= 3.0.1 =
+
+* prevent error on merge excludes if not an array
+* bust object cache after migration
+
+= 3.0 =
+
+* new admin UI for settings
+* new admin UI for diagnostics
+* new admin UI for generate
+* ported ajax requests to Rest API for better performance and maintainability
+* improved diagnostics with better (and more meaningful) error messages
+* conditional settings for certain setups
+* improved support for Windows Azure (path conversion)
+* auto-migration from old settings + manuall trigger
+* import and export settings via JSON
+
+= 2.3.2 =
+
+* bugfix: Elementor asset loading via webpack
+* repositioned filter for HTTPS args to be able to modify all arguments
+* latest version of WP Background processing added
+
+= 2.3.1 =
+
+* improved Elementor asset handling (free and pro version)
+* new filter to modify excludes
+
+= 2.3.0 =
+
+* fix for Yoast sitemap inclusion
+* better approach to extract URLs from HTML
+* added support for WP-CLI integration
+* better task handling with ajax and WP-Cron with progress without reload
+* better quote handling in JSON
+* improved SimplyCDN integration and security token handling
+* fix for redirect pages by removing query args before saving
+* fix for Elementor Pro for data attributes
 
 = 2.2.9 =
 
