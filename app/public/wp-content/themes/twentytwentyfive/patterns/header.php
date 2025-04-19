@@ -12,6 +12,16 @@
  */
 
 ?>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-1WMDJ0WB2L"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-1WMDJ0WB2L');
+</script>
+
 <!-- wp:group {"align":"full","layout":{"type":"default"}} -->
 <div class="wp-block-group alignfull">
 	<!-- wp:group {"layout":{"type":"constrained"}} -->
