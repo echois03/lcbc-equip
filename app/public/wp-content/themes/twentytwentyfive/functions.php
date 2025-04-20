@@ -5,7 +5,7 @@
  * @link https://developer.wordpress.org/themes/basics/theme-functions/
  *
  * @package WordPress
- * @subpackage Twenty_Twenty_Five
+ * @subpackage Twenty_Twenty-Five
  * @since Twenty Twenty-Five 1.0
  */
 
@@ -156,3 +156,21 @@ if ( ! function_exists( 'twentytwentyfive_format_binding' ) ) :
 		}
 	}
 endif;
+
+/**
+ * Adds Google Analytics script to wp_head on production sites.
+ */
+add_action( 'wp_head', function() {
+	if ( ! in_array( $_SERVER['HTTP_HOST'], [ 'localhost', '127.0.0.1' ] ) ) {
+		?>
+		<!-- Google tag (gtag.js) -->
+		<script async src="https://www.googletagmanager.com/gtag/js?id=G-1WMDJ0WB2L"></script>
+		<script>
+			window.dataLayer = window.dataLayer || [];
+			function gtag(){dataLayer.push(arguments);}
+			gtag('js', new Date());
+			gtag('config', 'G-1WMDJ0WB2L');
+		</script>
+		<?php
+	}
+} );
