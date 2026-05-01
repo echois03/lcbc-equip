@@ -3,8 +3,8 @@
 namespace Simply_Static;
 
 use Exception;
-use voku\helper\HtmlDomParser;
-use function WPML\FP\apply;
+use DOMDocument;
+use DOMXPath;
 
 // Exit if accessed directly
 if ( ! defined( 'ABSPATH' ) ) {
@@ -30,8 +30,19 @@ class Url_Extractor {
 	protected static $match_tags = array(
 		'a'       => array( 'href', 'urn', 'style' ),
 		'base'    => array( 'href' ),
-		'img'     => array( 'src', 'usemap', 'longdesc', 'dynsrc', 'lowsrc', 'srcset', 'data-src', 'data-srcset', 'data-bg' ),
-		'picture' => array( 'src', 'srcset' ),
+		'img'     => array(
+			'src',
+			'usemap',
+			'longdesc',
+			'dynsrc',
+			'lowsrc',
+			'srcset',
+			'data-src',
+			'data-srcset',
+			'data-bg'
+		),
+		'use'     => array( 'href' ),
+		'picture' => array( 'src', 'srcset', 'data-src', 'data-srcset', 'data-bg' ),
 		'amp-img' => array( 'src', 'srcset' ),
 
 		'applet' => array( 'code', 'codebase', 'archive', 'object' ),
@@ -42,6 +53,7 @@ class Url_Extractor {
 		'blockquote' => array( 'cite' ),
 		'del'        => array( 'cite' ),
 		'frame'      => array( 'longdesc', 'src' ),
+		'iframe'     => array( 'src' ),
 		'head'       => array( 'profile' ),
 		'ins'        => array( 'cite' ),
 		'object'     => array( 'archive', 'classid', 'codebase', 'data', 'usemap' ),
@@ -56,12 +68,12 @@ class Url_Extractor {
 		'html'         => array( 'manifest', 'background', 'xmlns' ),
 		'source'       => array( 'src', 'srcset' ),
 		'video'        => array( 'src', 'poster', 'srcset' ),
-		'image'        => array( 'href', 'xlink:href', 'src', 'style' ),
+		'image'        => array( 'href', 'xlink:href', 'src', 'style', 'srcset' ),
 
 		'bgsound' => array( 'src' ),
-		'div'     => array( 'href', 'src', 'style' ),
-		'span'    => array( 'href', 'src', 'style' ),
-		'section' => array( 'style' ),
+		'div'     => array( 'href', 'src', 'style', 'data-bg', 'data-thumbnail' ),
+		'span'    => array( 'href', 'src', 'style', 'data-bg' ),
+		'section' => array( 'style', 'data-bg' ),
 		'footer'  => array( 'style' ),
 		'header'  => array( 'style' ),
 		'ilayer'  => array( 'src' ),
@@ -83,18 +95,9 @@ class Url_Extractor {
 		'wml'      => array( 'xmlns' ),
 
 		'meta' => array( 'content' ),
-		'link' => array( 'href' ),
-		'atom' => array( 'href' )
+		'link' => array( 'href', 'data-pmdelayedstyle' ),
+		'atom' => array( 'href' ),
 	);
-
-	// /** @const */
-	// protected static $match_metas = array(
-	//	 'content-base',
-	//	 'content-location',
-	//	 'referer',
-	//	 'location',
-	//	 'refresh',
-	// );
 
 	/**
 	 * The static page to extract URLs from
@@ -109,10 +112,28 @@ class Url_Extractor {
 	protected $options = null;
 
 	/**
+	 * Array to temporarily store preserved xmp tags
+	 * @var array
+	 */
+	private $xmp_tags = [];
+
+	/**
 	 * The url of the site
 	 * @var array
 	 */
 	public $extracted_urls = array();
+
+	/**
+	 * Stores script tags extracted from HTML
+	 * @var array
+	 */
+	private $script_tags = array();
+
+	/**
+	 * Array to temporarily store preserved SVG data URIs from style attributes
+	 * @var array
+	 */
+	private $svg_data_uris = [];
 
 	/**
 	 * Constructor
@@ -140,7 +161,9 @@ class Url_Extractor {
 		$context = stream_context_create( $opts );
 		$path    = $this->options->get_archive_dir() . $this->static_page->file_path;
 
-		return file_get_contents( $path, false, $context );
+		$content = file_get_contents( $path, false, $context );
+
+		return Util::strip_bom( $content );
 	}
 
 	/**
@@ -151,7 +174,33 @@ class Url_Extractor {
 	 * @return int|false
 	 */
 	public function save_body( $content ) {
+		// Ensure content is always a string before passing through filters.
+		// Prevents null propagation from upstream callers or failing regex operations.
+		if ( null === $content ) {
+			$content = '';
+		}
+
 		$content = apply_filters( 'simply_static_content_before_save', $content, $this );
+
+		// Guard against filters returning null (e.g. due to PCRE backtrack/recursion limit errors).
+		if ( null === $content ) {
+			$content = '';
+		}
+
+		// Restore script tags if they exist and there are placeholders in the content
+		if ( ! empty( $this->script_tags ) && is_string( $content ) && strpos( $content, 'SCRIPT_PLACEHOLDER' ) !== false ) {
+			$_result = preg_replace_callback( '/<!-- SCRIPT_PLACEHOLDER_(\d+) -->/', function ( $matches ) {
+				$index = (int) $matches[1];
+				if ( isset( $this->script_tags[ $index ] ) ) {
+					return $this->script_tags[ $index ];
+				} else {
+					return '';
+				}
+			}, $content );
+			if ( null !== $_result ) {
+				$content = $_result;
+			}
+		}
 
 		return file_put_contents( $this->options->get_archive_dir() . $this->static_page->file_path, $content );
 	}
@@ -178,21 +227,39 @@ class Url_Extractor {
 	 * @return array
 	 */
 	public function extract_and_update_urls() {
+		// Reset preserved tags for each extraction run
+		$this->xmp_tags = [];
+
 		if ( $this->static_page->is_type( 'html' ) ) {
 			$this->save_body( $this->extract_and_replace_urls_in_html() );
+			$body = apply_filters( 'ss_after_replace_urls_in_html', $this->get_body(), $this->static_page );
+			$this->save_body( $body );
 		}
 
-		if ( $this->static_page->is_type( 'css' ) ) {
+		// Treat as CSS either by content-type or by file extension fallback (handles servers sending wrong or missing headers)
+		$looks_like_css = $this->static_page->is_type( 'css' ) || ( isset( $this->static_page->file_path ) && substr( $this->static_page->file_path, - 4 ) === '.css' );
+		if ( $looks_like_css ) {
 			$this->save_body( $this->extract_and_replace_urls_in_css( $this->get_body() ) );
 		}
 
-		if ( $this->static_page->is_type( 'xml' ) ) {
+		if ( $this->static_page->is_type( 'xml' ) || $this->static_page->is_type( 'xsl' ) ) {
 			$this->save_body( $this->extract_and_replace_urls_in_xml() );
 		}
 
-		if ( $this->static_page->is_type( 'html' ) || $this->static_page->is_type( 'css' ) || $this->static_page->is_type( 'xml' ) ) {
-			// Replace encoded URLs.
-			$this->replace_encoded_urls();
+		if ( $this->static_page->is_type( 'json' ) ) {
+			// Check if the URL includes 'simply-static/configs'
+			if ( strpos( $this->static_page->file_path, 'simply-static/configs' ) === false ) {
+				// Proceed to replace the URL.
+				$this->save_body( $this->extract_and_replace_urls_in_json() );
+			}
+		}
+
+		if ( $this->static_page->is_type( 'html' ) || $this->static_page->is_type( 'css' ) || $this->static_page->is_type( 'xml' ) || $this->static_page->is_type( 'json' ) ) {
+			// Check if the URL includes 'simply-static/configs'
+			if ( strpos( $this->static_page->file_path, 'simply-static/configs' ) === false ) {
+				// Replace encoded URLs.
+				$this->replace_encoded_urls();
+			}
 
 			// If activated forced string/replace for URLs.
 			if ( $this->options->get( 'force_replace_url' ) && ( ! $this->options->get( 'use_forms' ) && ! $this->options->get( 'use_comments' ) ) ) {
@@ -201,6 +268,353 @@ class Url_Extractor {
 		}
 
 		return array_unique( $this->extracted_urls );
+	}
+
+	/**
+	 * Check if a string is valid JSON
+	 *
+	 * @param string $string The string to check
+	 *
+	 * @return bool Whether the string is valid JSON
+	 */
+	private function is_valid_json( $string ) {
+		if ( ! is_string( $string ) ) {
+			return false;
+		}
+
+		// Quick pre-check to avoid expensive decode attempts on non-JSON strings
+		$trimmed = trim( $string );
+		if ( $trimmed === '' ) {
+			return false;
+		}
+		$first = $trimmed[0];
+		if ( $first !== '{' && $first !== '[' && strpos( $trimmed, '{' ) === false && strpos( $trimmed, '[' ) === false ) {
+			return false;
+		}
+
+		// Create a safe, normalized copy for detection only (do not mutate the original)
+		// Decode HTML entities (including quotes) so JSON can be recognized reliably
+		$normalized = html_entity_decode( $trimmed, ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE, 'UTF-8' );
+
+		// Attempt to decode
+		$json_data = json_decode( $normalized, true );
+
+		return $json_data !== null && ( is_array( $json_data ) || is_object( $json_data ) );
+	}
+
+	/**
+	 * Flag for preserving attributes.
+	 *
+	 * @return mixed|null
+	 */
+	protected function can_preserve_attributes() {
+		return apply_filters( 'ss_extract_html_preserve_attributes', true );
+	}
+
+	/**
+	 * Preserve attributes in HTML content
+	 *
+	 * @param string $content The HTML content
+	 *
+	 * @return array An array containing the modified content and the preserved JSON attributes
+	 */
+	private function preserve_attributes( $content ) {
+
+		if ( ! $this->can_preserve_attributes() ) {
+			return $content;
+		}
+
+		// Protect both named and numeric (decimal/hex) entities commonly used within attributes
+		// so that subsequent global decoding steps won't turn them into raw characters and break markup.
+		$entity_variants = [
+			'quote'     => [ '&quot;', '&#34;', '&#x22;', '&#X22;' ],
+			'apos'      => [ '&apos;', '&#39;', '&#x27;', '&#X27;' ],
+			'lessthan'  => [ '&lt;', '&#60;', '&#x3C;', '&#X3C;' ],
+			'greatthan' => [ '&gt;', '&#62;', '&#x3E;', '&#X3E;' ],
+			'ampersand' => [ '&amp;', '&#38;', '&#x26;', '&#X26;' ],
+		];
+
+		foreach ( $entity_variants as $placeholder_name => $variants ) {
+			$placeholder = strtoupper( $placeholder_name ) . '_PLACEHOLDER';
+			foreach ( $variants as $entity ) {
+				if ( strpos( $content, $entity ) !== false ) {
+					$content = str_replace( $entity, $placeholder, $content );
+				}
+			}
+		}
+
+
+		return $content;
+	}
+
+	/**
+	 * Restore attributes in HTML content
+	 *
+	 * @param string $content The HTML content with placeholders
+	 *
+	 * @return string The HTML content with restored attributes
+	 */
+	private function restore_attributes( $content ) {
+
+		if ( ! $this->can_preserve_attributes() ) {
+			return $content;
+		}
+
+		// Restore placeholders back to safe, named entities for consistency
+		$restore_map = [
+			'QUOTE_PLACEHOLDER'     => '&quot;',
+			'APOS_PLACEHOLDER'      => '&apos;',
+			'LESSTHAN_PLACEHOLDER'  => '&lt;',
+			'GREATTHAN_PLACEHOLDER' => '&gt;',
+			'AMPERSAND_PLACEHOLDER' => '&amp;',
+		];
+
+		foreach ( $restore_map as $placeholder => $entity ) {
+			if ( strpos( $content, $placeholder ) !== false ) {
+				$content = str_replace( $placeholder, $entity, $content );
+			}
+		}
+
+		return $content;
+	}
+
+	/**
+	 * Preserve SVG data URIs to prevent DOMDocument from mangling them.
+	 *
+	 * DOMDocument parses raw <svg>...</svg> markup inside attribute values and
+	 * <style> tag content as actual elements, which strips closing tags like </svg>.
+	 * This method encodes them before DOM processing.
+	 *
+	 * @param string $content The HTML content
+	 *
+	 * @return string The modified content with encoded SVG data URIs
+	 */
+	private function preserve_svg_data_uris( $content ) {
+		$this->svg_data_uris = [];
+
+		// Match style attributes whose value contains an SVG data URI with raw markup.
+		// We match style="..." or style='...' and check for data:image/svg+xml with <svg inside.
+		$_result = preg_replace_callback(
+			'/(<[^>]+\s)style\s*=\s*"([^"]*data:image\/svg\+xml[^"]*<svg[^"]*)"/is',
+			function ( $matches ) {
+				$index                 = count( $this->svg_data_uris );
+				$this->svg_data_uris[] = $matches[2];
+
+				return $matches[1] . 'style="SS_SVG_DATA_URI_PLACEHOLDER_' . $index . '"';
+			},
+			$content
+		);
+		if ( null !== $_result ) {
+			$content = $_result;
+		}
+
+		// Same for single-quoted style attributes
+		$_result = preg_replace_callback(
+			"/(<[^>]+\s)style\s*=\s*'([^']*data:image\/svg\+xml[^']*<svg[^']*)'/is",
+			function ( $matches ) {
+				$index                 = count( $this->svg_data_uris );
+				$this->svg_data_uris[] = $matches[2];
+
+				return $matches[1] . "style='SS_SVG_DATA_URI_PLACEHOLDER_" . $index . "'";
+			},
+			$content
+		);
+		if ( null !== $_result ) {
+			$content = $_result;
+		}
+
+		// Preserve SVG data URIs inside CSS url() constructs (typically found in <style> blocks).
+		// DOMDocument would otherwise parse <svg>...</svg> inside these as real SVG elements
+		// and strip the closing </svg> tag, breaking the inline SVG image.
+
+		// Double-quoted url("data:image/svg+xml......</svg>")
+		$_result = preg_replace_callback(
+			"/url\(\s*\"(data:image\/svg\+xml(?:[^\"\\\\]|\\\\.)*<\/svg>)\"\s*\)/is",
+			function ( $matches ) {
+				$index                 = count( $this->svg_data_uris );
+				$this->svg_data_uris[] = $matches[0];
+
+				return 'SS_SVG_DATA_URI_PLACEHOLDER_' . $index;
+			},
+			$content
+		);
+		if ( null !== $_result ) {
+			$content = $_result;
+		}
+
+		// Single-quoted url('data:image/svg+xml......</svg>')
+		$_result = preg_replace_callback(
+			"/url\(\s*'(data:image\/svg\+xml(?:[^'\\\\]|\\\\.)*<\/svg>)'\s*\)/is",
+			function ( $matches ) {
+				$index                 = count( $this->svg_data_uris );
+				$this->svg_data_uris[] = $matches[0];
+
+				return 'SS_SVG_DATA_URI_PLACEHOLDER_' . $index;
+			},
+			$content
+		);
+		if ( null !== $_result ) {
+			$content = $_result;
+		}
+
+		return $content;
+	}
+
+	/**
+	 * Restore preserved SVG data URIs in style attributes after DOM processing.
+	 *
+	 * @param string $content The HTML content with placeholders
+	 *
+	 * @return string The HTML content with restored SVG data URIs
+	 */
+	private function restore_svg_data_uris( $content ) {
+		if ( empty( $this->svg_data_uris ) ) {
+			return $content;
+		}
+
+		foreach ( $this->svg_data_uris as $index => $original ) {
+			$placeholder = 'SS_SVG_DATA_URI_PLACEHOLDER_' . $index;
+			$content     = str_replace( $placeholder, $original, $content );
+		}
+
+		return $content;
+	}
+
+	/**
+	 * Extract and preserve <xmp> tags to prevent corruption during processing
+	 *
+	 * @param string $content The HTML content
+	 *
+	 * @return string The modified content with placeholders
+	 */
+	private function preserve_xmp_tags( $content ) {
+		// The <xmp> tag is deprecated but still used by some plugins like Elementor Code Highlight
+		// Using a non-comment placeholder format to avoid being captured by comment extraction
+		$placeholder = '<ss-xmp-placeholder data-index="%d"></ss-xmp-placeholder>';
+		$regex       = '/<xmp\b[^>]*>.*?<\/xmp>/is';
+
+		$content = preg_replace_callback( $regex, function ( $matches ) use ( $placeholder ) {
+			$index            = count( $this->xmp_tags );
+			$this->xmp_tags[] = $matches[0]; // Store the entire xmp tag unchanged
+
+			return sprintf( $placeholder, $index );
+		}, $content );
+
+		return $content;
+	}
+
+	/**
+	 * Restore preserved <xmp> tags in HTML content
+	 *
+	 * @param string $content The HTML content with placeholders
+	 *
+	 * @return string The HTML content with restored xmp tags
+	 */
+	private function restore_xmp_tags( $content ) {
+		if ( empty( $this->xmp_tags ) ) {
+			return $content;
+		}
+
+		$content = preg_replace_callback( '/<ss-xmp-placeholder data-index="(\d+)"><\/ss-xmp-placeholder>/', function ( $matches ) {
+			$index = (int) $matches[1];
+			if ( isset( $this->xmp_tags[ $index ] ) ) {
+				return $this->xmp_tags[ $index ];
+			} else {
+				return '';
+			}
+		}, $content );
+
+		return $content;
+	}
+
+	/**
+	 * Repair HTML structure to match browser (HTML5 parser) behavior before DOMDocument.
+	 *
+	 * When a sectioning element (e.g. <section>) is closed with </section> but contains
+	 * unclosed child elements (e.g. <div>), browsers implicitly close those children.
+	 * DOMDocument (libxml2 HTML4 parser) does NOT — it keeps the child open and reparents
+	 * subsequent sibling elements into the unclosed child, breaking the page layout.
+	 *
+	 * This method scans through the HTML with a tag stack and inserts the missing closing
+	 * tags before each sectioning closing tag, matching browser behavior.
+	 *
+	 * @param string $html The HTML string to repair.
+	 *
+	 * @return string The repaired HTML string.
+	 */
+	private function repair_html_structure( $html ) {
+		if ( empty( $html ) ) {
+			return $html;
+		}
+
+		$void_elements  = array_flip( [ 'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr' ] );
+		$sectioning     = array_flip( [ 'section', 'article', 'aside', 'nav', 'main', 'header', 'footer' ] );
+		$stack          = [];
+		$result         = '';
+		$offset         = 0;
+
+		// Regex to match HTML tags. Uses a pattern that handles quoted attributes properly
+		// to avoid matching '>' inside attribute values.
+		$tag_pattern = '/<(\/?)([a-zA-Z][a-zA-Z0-9]*)(\s[^>]*)?\/?>/s';
+
+		while ( preg_match( $tag_pattern, $html, $match, PREG_OFFSET_CAPTURE, $offset ) ) {
+			$tag_full       = $match[0][0];
+			$tag_pos        = $match[0][1];
+			$is_closing     = ( $match[1][0] === '/' );
+			$tag_name       = strtolower( $match[2][0] );
+			$is_self_close  = ( substr( rtrim( $tag_full ), -2 ) === '/>' );
+
+			// Append content before this tag.
+			$result .= substr( $html, $offset, $tag_pos - $offset );
+			$offset  = $tag_pos + strlen( $tag_full );
+
+			// Skip void and self-closing elements.
+			if ( isset( $void_elements[ $tag_name ] ) || $is_self_close ) {
+				$result .= $tag_full;
+				continue;
+			}
+
+			if ( $is_closing ) {
+				if ( isset( $sectioning[ $tag_name ] ) ) {
+					// Closing a sectioning element: close all unclosed children first.
+					$close_tags = '';
+					while ( ! empty( $stack ) ) {
+						$top = end( $stack );
+
+						if ( $top === $tag_name ) {
+							// Found the matching opening sectioning tag — pop it and stop.
+							array_pop( $stack );
+							break;
+						}
+
+						// Pop and emit a closing tag for this unclosed child element.
+						array_pop( $stack );
+						$close_tags .= "</{$top}>";
+					}
+
+					$result .= $close_tags . $tag_full;
+				} else {
+					// Regular closing tag — find and remove its matching opener from the stack.
+					for ( $i = count( $stack ) - 1; $i >= 0; $i-- ) {
+						if ( $stack[ $i ] === $tag_name ) {
+							array_splice( $stack, $i, 1 );
+							break;
+						}
+					}
+
+					$result .= $tag_full;
+				}
+			} else {
+				// Opening tag — push onto the stack.
+				$stack[] = $tag_name;
+				$result .= $tag_full;
+			}
+		}
+
+		// Append any remaining content after the last tag.
+		$result .= substr( $html, $offset );
+
+		return $result;
 	}
 
 	/**
@@ -219,9 +633,14 @@ class Url_Extractor {
 	 * @return void
 	 */
 	public function replace_encoded_urls() {
-
 		$destination_url = $this->options->get_destination_url();
 		$response_body   = $this->get_body();
+
+		// Preserve JSON attributes before replacement
+		$response_body = $this->preserve_attributes( $response_body );
+
+		// Preserve <xmp> tags
+		$response_body = $this->preserve_xmp_tags( $response_body );
 
 		// replace wp_json_encode'd urls, as used by WP's `concatemoji`
 		$response_body = str_replace( addcslashes( Util::origin_url(), '/' ), addcslashes( $destination_url, '/' ), $response_body );
@@ -229,7 +648,104 @@ class Url_Extractor {
 		// replace encoded URLs, as found in query params
 		$response_body = preg_replace( '/(https?%3A)?%2F%2F' . addcslashes( urlencode( Util::origin_host() ), '.' ) . '/i', urlencode( $destination_url ), $response_body );
 
+		// Restore preserved <xmp> tags
+		$response_body = $this->restore_xmp_tags( $response_body );
+
+		// Restore preserved JSON attributes
+		$response_body = $this->restore_attributes( $response_body );
+
 		$this->save_body( $response_body );
+	}
+
+
+	/**
+	 * Force Replace the origin URL from the content with the destination URL.
+	 *
+	 * @param string $content Content.
+	 *
+	 * @return array|string|string[]
+	 */
+	public function force_replace( $content ) {
+		$destination_url = $this->options->get_destination_url();
+
+		// Preserve JSON attributes before replacement
+		$content = $this->preserve_attributes( $content );
+
+		// Preserve <xmp> tags
+		$content = $this->preserve_xmp_tags( $content );
+
+		// replace any instance of the origin url, whether it starts with https://, http://, or //.
+		$content = preg_replace( '/(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', $destination_url, $content );
+
+		// replace wp_json_encode'd urls, as used by WP's `concatemoji`.
+		// e.g. {"concatemoji":"http:\/\/www.example.org\/wp-includes\/js\/wp-emoji-release.min.js?ver=4.6.1"}.
+		$content = str_replace( addcslashes( untrailingslashit( Util::origin_url() ), '/' ), addcslashes( untrailingslashit( $destination_url ), '/' ), $content );
+
+		// Restore preserved <xmp> tags
+		$content = $this->restore_xmp_tags( $content );
+
+		// Restore preserved JSON attributes
+		$content = $this->restore_attributes( $content );
+
+		return $content;
+	}
+
+	/**
+	 * Replace origin URLs found in data-* attributes across all DOM elements.
+	 *
+	 * Scans every element for attributes whose name starts with "data-" and
+	 * whose value contains the origin host. When found, the origin URL is
+	 * replaced with the destination URL. This catches custom plugin attributes
+	 * like data-pmdelayedstyle, data-lazy-src, etc. that are not listed in
+	 * the static $match_tags array.
+	 *
+	 * @param \DOMXPath $xpath The XPath instance for the current DOM.
+	 *
+	 * @return void
+	 */
+	private function replace_origin_urls_in_data_attributes( $xpath ) {
+		$origin_host = Util::origin_host();
+
+		// Query all elements that have at least one attribute (performance guard).
+		$elements = $xpath->query( '//*[@*]' );
+
+		if ( ! $elements || $elements->length === 0 ) {
+			return;
+		}
+
+		foreach ( $elements as $element ) {
+			if ( ! $element->hasAttributes() ) {
+				continue;
+			}
+
+			// Iterate over a snapshot of attribute names to avoid issues when mutating.
+			$attrs_to_check = [];
+			foreach ( $element->attributes as $attr ) {
+				if ( strpos( $attr->name, 'data-' ) === 0 ) {
+					$attrs_to_check[] = $attr->name;
+				}
+			}
+
+			foreach ( $attrs_to_check as $attr_name ) {
+				$value = $element->getAttribute( $attr_name );
+
+				if ( empty( $value ) || stripos( $value, $origin_host ) === false ) {
+					continue;
+				}
+
+				// Skip if the attribute value is valid JSON (e.g. Elementor data-settings).
+				if ( $this->is_valid_json( $value ) ) {
+					continue;
+				}
+
+				// Try to process as a URL and replace with the destination.
+				$updated_url = $this->add_to_extracted_urls( $value );
+
+				if ( ! is_null( $updated_url ) ) {
+					$element->setAttribute( $attr_name, $updated_url );
+				}
+			}
+		}
 	}
 
 	/**
@@ -248,24 +764,8 @@ class Url_Extractor {
 	 * @return void
 	 */
 	public function force_replace_urls() {
-		/*
-		TODO:
-		Can we get it to work with offline URLs via preg_replace_callback
-		+ convert_url? To do that we'd need to grab the entire URL. Ideally
-		that would also work with escaped URLs / inside of JavaScript. And
-		even more ideally, we'd only have a single preg_replace.
-		 */
-
-		$destination_url = $this->options->get_destination_url();
-		$response_body   = $this->get_body();
-
-		// replace any instance of the origin url, whether it starts with https://, http://, or //.
-		$response_body = preg_replace( '/(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', $destination_url, $response_body );
-
-		// replace wp_json_encode'd urls, as used by WP's `concatemoji`.
-		// e.g. {"concatemoji":"http:\/\/www.example.org\/wp-includes\/js\/wp-emoji-release.min.js?ver=4.6.1"}.
-		$response_body = str_replace( addcslashes( Util::origin_url(), '/' ), addcslashes( $destination_url, '/' ), $response_body );
-
+		$response_body = $this->get_body();
+		$response_body = $this->force_replace( $response_body );
 		$response_body = apply_filters( 'simply_static_force_replaced_urls_body', $response_body, $this->static_page );
 
 		$this->save_body( $response_body );
@@ -277,36 +777,104 @@ class Url_Extractor {
 	 * The tag is passed by reference, so it's updated directly and nothing is
 	 * returned from this function.
 	 *
-	 * @param simple_html_dom_node $tag SHDP dom node
+	 * @param DOMElement $tag DOM element node
 	 * @param string $tag_name name of the tag
 	 * @param array $attributes array of attribute notes
 	 *
 	 * @return void
 	 */
 	private function extract_urls_and_update_tag( &$tag, $tag_name, $attributes ) {
-		if ( isset( $tag->style ) ) {
-			$updated_css = $this->extract_and_replace_urls_in_css( $tag->style );
-			$tag->style  = $updated_css;
+		// Handle style attribute
+		if ( $tag->hasAttribute( 'style' ) ) {
+			$style_value = $tag->getAttribute( 'style' );
+			$updated_css = $this->extract_and_replace_urls_in_css( $style_value );
+			$tag->setAttribute( 'style', $updated_css );
+		}
+
+		// Handle link tags with data: URIs containing CSS (e.g., inline stylesheets)
+		if ( 'link' === $tag_name && $tag->hasAttribute( 'href' ) ) {
+			$href_value = $tag->getAttribute( 'href' );
+			if ( stripos( $href_value, 'data:' ) === 0 && stripos( $href_value, 'text/css' ) !== false ) {
+				$updated_href = $this->process_data_uri_css( $href_value );
+				$tag->setAttribute( 'href', $updated_href );
+				// Remove href from attributes to avoid double processing
+				$attributes = array_diff( $attributes, array( 'href' ) );
+			}
+		}
+
+		// Handle link tags with rel="preconnect" or rel="dns-prefetch" pointing to origin host.
+		// These tags are browser hints for establishing early connections to external servers.
+		// In a static export, referencing the origin (WordPress) host is both useless and a security
+		// concern as it exposes the staging/source URL. Remove these tags entirely.
+		if ( 'link' === $tag_name && $tag->hasAttribute( 'rel' ) && $tag->hasAttribute( 'href' ) ) {
+			$rel_value = strtolower( trim( $tag->getAttribute( 'rel' ) ) );
+			if ( in_array( $rel_value, array( 'preconnect', 'dns-prefetch' ), true ) ) {
+				$href_value = $tag->getAttribute( 'href' );
+				// Check if the href points to the origin host
+				$origin_host = Util::origin_host();
+				if ( stripos( Util::strip_protocol_from_url( $href_value ), $origin_host ) === 0 ) {
+					// Remove the tag from the DOM entirely
+					$tag->parentNode->removeChild( $tag );
+
+					return;
+				}
+			}
 		}
 
 		foreach ( $attributes as $attribute_name ) {
-			if ( isset( $tag->$attribute_name ) ) {
+			if ( $tag->hasAttribute( $attribute_name ) ) {
 				$extracted_urls  = array();
-				$attribute_value = $tag->$attribute_name;
+				$attribute_value = $tag->getAttribute( $attribute_name );
+
+				// Skip processing any attribute that contains valid JSON to prevent breaking JSON structure
+				if ( $this->is_valid_json( $attribute_value ) ) {
+					// This attribute contains JSON, don't process it as a URL
+					continue;
+				}
 
 				// we need to verify that the meta tag is a URL.
 				if ( 'meta' === $tag_name ) {
 					if ( filter_var( $attribute_value, FILTER_VALIDATE_URL ) ) {
 						$extracted_urls[] = $attribute_value;
 					}
-				} else {
-					// srcset is a fair bit different from most html
-					if ( $attribute_name === 'srcset' || $attribute_name === 'data-srcset' ) {
-						$extracted_urls = $this->extract_urls_from_srcset( $attribute_value );
-					} else {
-						$extracted_urls[] = $attribute_value;
-					}
-				}
+ 			} else {
+ 				// srcset is a fair bit different from most html
+ 				if ( $attribute_name === 'srcset' || $attribute_name === 'data-srcset' ) {
+ 					// Process each srcset entry individually and reconstruct the attribute.
+ 					// This avoids str_replace substring collisions that would corrupt Cloudinary
+ 					// transformation parameters like f_auto,q_auto or w_300,h_195,c_scale which
+ 					// contain commas that must be preserved verbatim inside each URL.
+ 					$strict_url_validation_srcset = apply_filters( 'simply_static_strict_url_validation', false );
+ 					$updated_entries              = array();
+ 					foreach ( preg_split( '/,(?:\s*(?=https?:\/\/|\/\/|\/[^\/])|\s+)/', $attribute_value ) as $srcset_entry ) {
+ 						$srcset_entry = trim( $srcset_entry );
+ 						if ( $srcset_entry === '' ) {
+ 							continue;
+ 						}
+ 						// Separate the URL from the optional width/density descriptor (e.g. "1500w", "2x").
+ 						$descriptor = '';
+ 						$url_part   = $srcset_entry;
+ 						if ( preg_match( '/^(.*\S)\s+([\d.]+[xw])\s*$/i', $srcset_entry, $entry_match ) ) {
+ 							$url_part   = $entry_match[1];
+ 							$descriptor = ' ' . $entry_match[2];
+ 						}
+ 						// Skip pure-number artifacts (bare descriptors parsed without a URL).
+ 						if ( preg_match( '/^\d+$/', trim( $url_part ) ) ) {
+ 							continue;
+ 						}
+ 						if ( $strict_url_validation_srcset && ! filter_var( $url_part, FILTER_VALIDATE_URL ) ) {
+ 							$updated_entries[] = $url_part . $descriptor;
+ 							continue;
+ 						}
+ 						$updated_url       = $this->add_to_extracted_urls( $url_part );
+ 						$updated_entries[] = ( ! is_null( $updated_url ) && $updated_url !== '' ? $updated_url : $url_part ) . $descriptor;
+ 					}
+ 					$tag->setAttribute( $attribute_name, implode( ', ', $updated_entries ) );
+ 					continue; // Srcset fully handled above; skip the generic str_replace loop.
+ 				} else {
+ 					$extracted_urls[] = $attribute_value;
+ 				}
+ 			}
 
 				$strict_url_validation = apply_filters( 'simply_static_strict_url_validation', false );
 
@@ -323,10 +891,9 @@ class Url_Extractor {
 						}
 					}
 				}
-				$tag->$attribute_name = $attribute_value;
+				$tag->setAttribute( $attribute_name, $attribute_value );
 			}
 		}
-
 	}
 
 	/**
@@ -342,54 +909,245 @@ class Url_Extractor {
 		$html_string = $this->get_body();
 		$match_tags  = apply_filters( 'ss_match_tags', self::$match_tags );
 
-		$dom = HtmlDomParser::str_get_html( $html_string );
+		// Preserve JSON attributes before processing
+		$html_string = $this->preserve_attributes( $html_string );
 
-		// return the original html string if dom is blank or boolean (unparseable)
-		if ( $dom == '' || is_bool( $dom ) ) {
+		// Extract and preserve <xmp> tags to prevent DOMDocument from corrupting their content
+		$html_string = $this->preserve_xmp_tags( $html_string );
+
+		// Preserve SVG data URIs in style attributes before DOMDocument mangles them
+		$html_string = $this->preserve_svg_data_uris( $html_string );
+
+		// Extract and preserve non-conditional HTML comments to avoid altering their content (e.g., commented-out scripts)
+		$html_comments                 = [];
+		$comment_placeholder           = '<!-- COMMENT_PLACEHOLDER_%d -->';
+		$non_conditional_comment_regex = '/<!--(?!\s*\[if).*?-->/s';
+		$_result = preg_replace_callback( $non_conditional_comment_regex, function ( $matches ) use ( &$html_comments, &$comment_placeholder ) {
+			$index           = count( $html_comments );
+			$html_comments[] = $matches[0];
+
+			return sprintf( $comment_placeholder, $index );
+		}, $html_string );
+		if ( null !== $_result ) {
+			$html_string = $_result;
+		}
+
+		// Next, extract and save all script tags using regex to ensure they're preserved
+		$this->script_tags  = []; // Reset the array for each call
+		$script_placeholder = '<!-- SCRIPT_PLACEHOLDER_%d -->';
+		$script_regex       = '/<script\b[^>]*>.*?<\/script>/is';
+
+		// Extract and preserve conditional comments
+		$conditional_comments    = [];
+		$conditional_placeholder = '<!-- CONDITIONAL_COMMENT_PLACEHOLDER_%d -->';
+		// Match conditional comments with a simpler, more direct approach
+		// First pattern: match complete conditional comments (with closing tags)
+		$complete_conditional_regex = '/<!--\[if[^\]]*\]>.*?<!\[endif\]-->/s';
+		// Second pattern: match incomplete conditional comments (without closing tags)
+		$incomplete_conditional_regex = '/<!--\[if[^\]]*\]>((?!<!--\[if).)*?(?=<!--|$)/s';
+
+		// Use regex method to ensure script tags are preserved
+		// Extract script tags, process them for URL replacement, and replace them with placeholders
+		$_result = preg_replace_callback( $script_regex, function ( $matches ) use ( &$script_placeholder ) {
+			$index      = count( $this->script_tags );
+			$script_tag = $matches[0]; // The entire script tag
+
+			// Process script tag for URL replacement
+			// Replace URLs in src attribute
+			$script_tag = preg_replace_callback( '/<script\b([^>]*)src=(["\'])([^"\']+)(["\'])([^>]*)>/i', function ( $src_matches ) {
+				$before_src  = $src_matches[1];
+				$quote_start = $src_matches[2];
+				$src_url     = $src_matches[3];
+				$quote_end   = $src_matches[4];
+				$after_src   = $src_matches[5];
+
+				// Process the URL
+				$updated_url = $this->add_to_extracted_urls( $src_url );
+
+				return "<script{$before_src}src={$quote_start}{$updated_url}{$quote_end}{$after_src}>";
+			}, $script_tag );
+
+			// Replace URLs in script content
+			$script_tag = preg_replace_callback( '/<script\b[^>]*>(.*?)<\/script>/is', function ( $content_matches ) {
+				$script_content = $content_matches[1];
+				if ( ! empty( $script_content ) ) {
+					// Process the script content
+					$updated_content = $this->extract_and_replace_urls_in_script( $script_content );
+
+					return str_replace( $script_content, $updated_content, $content_matches[0] );
+				}
+
+				return $content_matches[0];
+			}, $script_tag );
+
+			// Save the processed script tag
+			$this->script_tags[] = $script_tag;
+
+			return sprintf( $script_placeholder, $index );
+		}, $html_string );
+		if ( null !== $_result ) {
+			$html_string = $_result;
+		}
+
+		// First, extract and preserve complete conditional comments
+		$_result = preg_replace_callback( $complete_conditional_regex, function ( $matches ) use ( &$conditional_placeholder, &$conditional_comments ) {
+			$index               = count( $conditional_comments );
+			$conditional_comment = $matches[0]; // The complete conditional comment
+
+			// Process URLs in the conditional comment if needed
+			$conditional_comment = preg_replace_callback( '/<script\b([^>]*)src=(["\'])([^"\']+)(["\'])([^>]*)>/i', function ( $src_matches ) {
+				$before_src  = $src_matches[1];
+				$quote_start = $src_matches[2];
+				$src_url     = $src_matches[3];
+				$quote_end   = $src_matches[4];
+				$after_src   = $src_matches[5];
+
+				// Process the URL
+				$updated_url = $this->add_to_extracted_urls( $src_url );
+
+				return "<script{$before_src}src={$quote_start}{$updated_url}{$quote_end}{$after_src}>";
+			}, $conditional_comment );
+
+			// Save the processed conditional comment
+			$conditional_comments[] = $conditional_comment;
+
+			return sprintf( $conditional_placeholder, $index );
+		}, $html_string );
+		if ( null !== $_result ) {
+			$html_string = $_result;
+		}
+
+		// Then, extract and fix incomplete conditional comments
+		$_result = preg_replace_callback( $incomplete_conditional_regex, function ( $matches ) use ( &$conditional_placeholder, &$conditional_comments ) {
+			$index               = count( $conditional_comments );
+			$conditional_comment = $matches[0]; // The incomplete conditional comment
+
+			// Check if this is actually an incomplete conditional comment
+			if ( strpos( $conditional_comment, '<!--[if' ) === 0 && strpos( $conditional_comment, '<![endif]-->' ) === false ) {
+				// Process URLs in the conditional comment if needed
+				$conditional_comment = preg_replace_callback( '/<script\b([^>]*)src=(["\'])([^"\']+)(["\'])([^>]*)>/i', function ( $src_matches ) {
+					$before_src  = $src_matches[1];
+					$quote_start = $src_matches[2];
+					$src_url     = $src_matches[3];
+					$quote_end   = $src_matches[4];
+					$after_src   = $src_matches[5];
+
+					// Process the URL
+					$updated_url = $this->add_to_extracted_urls( $src_url );
+
+					return "<script{$before_src}src={$quote_start}{$updated_url}{$quote_end}{$after_src}>";
+				}, $conditional_comment );
+
+				// Add the missing closing tag
+				$conditional_comment .= '<![endif]-->';
+
+				// Save the processed and fixed conditional comment
+				$conditional_comments[] = $conditional_comment;
+
+				return sprintf( $conditional_placeholder, $index );
+			}
+
+			// If it's not actually an incomplete conditional comment, return it unchanged
+			return $conditional_comment;
+		}, $html_string );
+		if ( null !== $_result ) {
+			$html_string = $_result;
+		}
+
+		// If there's no HTML to process, return early to avoid DOM warnings/errors
+		if ( ! is_string( $html_string ) || trim( $html_string ) === '' ) {
+			return $html_string;
+		}
+
+		// Repair unclosed elements inside sectioning tags before DOMDocument parsing.
+		// Browsers (HTML5 parser) implicitly close open child elements (e.g. <div>) when
+		// encountering a parent's closing tag (e.g. </section>), but DOMDocument (libxml2
+		// HTML4 parser) does not — it keeps the child open and reparents subsequent
+		// sibling elements inside it, breaking the intended page structure.
+		$html_string = $this->repair_html_structure( $html_string );
+
+		// Use PHP's native DOMDocument
+		$dom = new DOMDocument();
+
+		// Suppress errors from malformed HTML
+		libxml_use_internal_errors( true );
+
+		// Determine site charset (fallback to UTF-8)
+		$charset = \get_bloginfo( 'charset' );
+		if ( empty( $charset ) ) {
+			$charset = 'UTF-8';
+		}
+
+		// Prepare HTML for DOM via helper (prefers mb_encode_numericentity; legacy fallback for PHP < 8.2)
+		$prepared     = Html_Encoding_Helper::prepare_html_for_dom( $html_string, $charset, $this );
+		$html_for_dom = is_array( $prepared ) && isset( $prepared['html'] ) ? $prepared['html'] : $html_string;
+		$dom_encoding = is_array( $prepared ) && isset( $prepared['encoding'] ) ? $prepared['encoding'] : $charset;
+
+		// Load the HTML, preserving whitespace and silencing libxml warnings
+		$dom->preserveWhiteSpace = true;
+		$dom->formatOutput       = false;
+
+		// Hint DOMDocument about the expected encoding
+		$dom->encoding = $dom_encoding;
+		$dom->loadHTML( $html_for_dom, LIBXML_NOWARNING | LIBXML_NOERROR );
+
+		// Clear any errors
+		libxml_clear_errors();
+
+		// Ensure body classes are preserved (fix for YoastSEO/Astra schema attributes)
+		$body_elements = $dom->getElementsByTagName( 'body' );
+
+		if ( $body_elements->length > 0 ) {
+			$body  = $body_elements->item( 0 );
+			$regex = '/<body\b[^>]*?\sclass\s*=\s*(["\'])(.*?)\1[^>]*>/is';
+
+			if ( preg_match( $regex, $html_string, $matches ) ) {
+				$class_string = $matches[2];
+				$body->setAttribute( 'class', $class_string );
+			}
+		}
+
+		// Create a DOMXPath object to query the DOM
+		$xpath = new DOMXPath( $dom );
+
+		// return the original html string if dom is blank or couldn't be parsed
+		if ( ! $dom->documentElement ) {
 			return $html_string;
 		} else {
 			// handle tags with attributes
 			foreach ( $match_tags as $tag_name => $attributes ) {
-				$tags = $dom->find( $tag_name );
+				$elements = $xpath->query( '//' . $tag_name );
 
-				foreach ( $tags as $tag ) {
-					$this->extract_urls_and_update_tag( $tag, $tag_name, $attributes );
+				if ( $elements ) {
+					foreach ( $elements as $element ) {
+						$this->extract_urls_and_update_tag( $element, $tag_name, $attributes );
+					}
 				}
 			}
+
+			// Replace origin URLs in data-* attributes across all elements.
+			// Some plugins use custom data attributes (e.g. data-pmdelayedstyle, data-lazy-src)
+			// that contain URLs pointing to the origin. These are not covered by $match_tags
+			// and would otherwise leak the WordPress origin URL in the static export.
+			$this->replace_origin_urls_in_data_attributes( $xpath );
 
 			// handle 'style' tag differently, since we need to parse the content.
 			$parse_inline_style = apply_filters( 'ss_parse_inline_style', true );
 
 			if ( $parse_inline_style ) {
-				$style_tags = $dom->find( 'style' );
+				$style_tags = $xpath->query( '//style' );
 
-				foreach ( $style_tags as $tag ) {
-					// Check if valid content exists.
-					try {
-						$updated_css        = $this->extract_and_replace_urls_in_css( $tag->innerhtmlKeep );
-						$tag->innerhtmlKeep = $updated_css;
-					} catch ( Exception $e ) {
-						// If not skip the result.
-						continue;
-					}
-				}
-			}
-
-			// handle 'script' tag differently, since we need to parse the content.
-			$parse_inline_script = apply_filters( 'ss_parse_inline_script', true );
-
-			if ( $parse_inline_script ) {
-				$script_tags = $dom->find( 'script' );
-
-				foreach ( $script_tags as $tag ) {
-					// Check if valid content exists.
-					try {
-						$updated_script     = $this->extract_and_replace_urls_in_script( $tag->innerhtmlKeep );
-						$tag->innerhtmlKeep = $updated_script;
-						$this->extract_and_replace_urls_in_script_inner_text( $tag );
-					} catch ( Exception $e ) {
-						// If not skip the result.
-						continue;
+				if ( $style_tags ) {
+					foreach ( $style_tags as $tag ) {
+						// Check if valid content exists.
+						try {
+							$content          = $tag->textContent;
+							$updated_css      = $this->extract_and_replace_urls_in_css( $content );
+							$tag->textContent = $updated_css;
+						} catch ( Exception $e ) {
+							// If not skip the result.
+							continue;
+						}
 					}
 				}
 			}
@@ -403,7 +1161,159 @@ class Url_Extractor {
 			// Further manipulate Dom?
 			$dom = apply_filters( 'ss_dom_before_save', $dom, $this->static_page->url );
 
-			return $dom->save();
+			// Check if $dom is still a DOMDocument object after filters
+			if ( is_string( $dom ) ) {
+				// If $dom has been converted to a string by a filter, return it directly
+				return $dom;
+			}
+
+			// Ensure a proper <meta charset> is present as the first child of <head>
+			try {
+				$charset = is_string( $charset ) && $charset !== '' ? $charset : \get_bloginfo( 'charset' );
+				if ( empty( $charset ) ) {
+					$charset = 'UTF-8';
+				}
+				$head_nodes = $dom->getElementsByTagName( 'head' );
+				$head       = $head_nodes && $head_nodes->length > 0 ? $head_nodes->item( 0 ) : null;
+				if ( ! $head ) {
+					// Create <head> if missing
+					$head         = $dom->createElement( 'head' );
+					$html_el_list = $dom->getElementsByTagName( 'html' );
+					$html_el      = $html_el_list && $html_el_list->length > 0 ? $html_el_list->item( 0 ) : null;
+					if ( $html_el ) {
+						if ( $html_el->firstChild ) {
+							$html_el->insertBefore( $head, $html_el->firstChild );
+						} else {
+							$html_el->appendChild( $head );
+						}
+					}
+				}
+				if ( $head ) {
+					// Find existing <meta charset>
+					$existing_meta = null;
+					foreach ( $head->getElementsByTagName( 'meta' ) as $m ) {
+						if ( $m->hasAttribute( 'charset' ) ) {
+							$existing_meta = $m;
+							break;
+						}
+					}
+					if ( $existing_meta ) {
+						$existing_meta->setAttribute( 'charset', $charset );
+						// Move to top of <head>
+						if ( $head->firstChild && $head->firstChild !== $existing_meta ) {
+							$head->insertBefore( $existing_meta, $head->firstChild );
+						}
+					} else {
+						$meta = $dom->createElement( 'meta' );
+						$meta->setAttribute( 'charset', $charset );
+						if ( $head->firstChild ) {
+							$head->insertBefore( $meta, $head->firstChild );
+						} else {
+							$head->appendChild( $meta );
+						}
+					}
+				}
+			} catch ( \Throwable $e ) {
+				// If anything goes wrong here, continue without blocking the export
+			}
+
+			// Save the HTML document
+			$html = $dom->saveHTML();
+
+			// Remove closing tags for HTML5 void elements that DOMDocument incorrectly adds.
+			// PHP's DOMDocument does not recognize newer HTML5 void elements like <source>,
+			// so saveHTML() may output e.g. </source>, causing W3C validation errors.
+			$html5_void_elements = array( 'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr' );
+			$html = preg_replace( '#</(' . implode( '|', $html5_void_elements ) . ')>#i', '', $html );
+
+			// Restore script tags
+			$_result = preg_replace_callback( '/<!-- SCRIPT_PLACEHOLDER_(\d+) -->/', function ( $matches ) {
+				$index = (int) $matches[1];
+				if ( isset( $this->script_tags[ $index ] ) ) {
+					return $this->script_tags[ $index ];
+				} else {
+					return '';
+				}
+			}, $html );
+			if ( null !== $_result ) {
+				$html = $_result;
+			}
+
+			// Restore xmp tags
+			$html = $this->restore_xmp_tags( $html );
+
+			// Restore SVG data URIs in style attributes
+			$html = $this->restore_svg_data_uris( $html );
+
+			// Restore conditional comments
+			$_result = preg_replace_callback( '/<!-- CONDITIONAL_COMMENT_PLACEHOLDER_(\d+) -->/', function ( $matches ) use ( $conditional_comments ) {
+				$index = (int) $matches[1];
+				if ( isset( $conditional_comments[ $index ] ) ) {
+					return $conditional_comments[ $index ];
+				} else {
+					return '';
+				}
+			}, $html );
+			if ( null !== $_result ) {
+				$html = $_result;
+			}
+
+			// Restore non-conditional comments exactly as they were
+			$_result = preg_replace_callback( '/<!-- COMMENT_PLACEHOLDER_(\d+) -->/', function ( $matches ) use ( $html_comments ) {
+				$index = (int) $matches[1];
+
+				return isset( $html_comments[ $index ] ) ? $html_comments[ $index ] : '';
+			}, $html );
+			if ( null !== $_result ) {
+				$html = $_result;
+			}
+
+			// Restore JSON attributes
+			$html = $this->restore_attributes( $html );
+
+			// Decode HTML entities across the final HTML using the site's charset so non-Latin text (e.g., Japanese/Arabic)
+			// is preserved as real characters instead of numeric entities. To avoid breaking complex attribute values
+			// (e.g., Elementor's data-settings JSON that may contain encoded SVG like &lt;svg&gt;), we protect attributes
+			// by replacing key entities with placeholders before decoding, then restore them afterwards.
+			$charset = \get_bloginfo( 'charset' );
+
+			if ( empty( $charset ) ) {
+				$charset = 'UTF-8';
+			}
+			$should_decode_final = apply_filters( 'simply_static_decode_final_html', true, $this );
+
+			if ( $should_decode_final ) {
+				// Protect attribute content that must remain entity-encoded during the global decode
+				$html = $this->preserve_attributes( $html );
+				$html = html_entity_decode( $html, ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE, $charset );
+				// Restore the protected attribute content back to entities to keep markup valid
+				$html = $this->restore_attributes( $html );
+			}
+
+			$html = apply_filters( 'ss_html_after_restored_attributes', $html, $this );
+
+			// Use regex to double-check <style> attributes for things like @font-face URLs.
+			$origin_host = Util::origin_host();
+
+			if ( strpos( $html, $origin_host ) !== false ) {
+				$_result = preg_replace_callback(
+					'/<style\b[^>]*>(.*?)<\/style>/is',
+					function ( $style_match ) use ( $origin_host ) {
+						if ( strpos( $style_match[1], $origin_host ) === false ) {
+							return $style_match[0];
+						}
+						$updated_css = $this->extract_and_replace_urls_in_css( $style_match[1] );
+
+						return str_replace( $style_match[1], $updated_css, $style_match[0] );
+					},
+					$html
+				);
+				if ( null !== $_result ) {
+					$html = $_result;
+				}
+			}
+
+			return $html;
 		}
 	}
 
@@ -417,13 +1327,89 @@ class Url_Extractor {
 	private function extract_urls_from_srcset( $srcset ) {
 		$extracted_urls = array();
 
-		foreach ( explode( ',', $srcset ) as $url_and_descriptor ) {
+		// Split srcset entries on commas, but only when:
+		//   (a) the comma is followed (with optional whitespace) by a URL start: https://, //, or /path
+		//   (b) OR the comma is followed by at least one whitespace (catches bare relative URLs)
+		// This preserves commas that are INSIDE Cloudinary transformation params like
+		// f_auto,q_auto or w_300,h_195,c_scale, which never start with a URL scheme or slash.
+		foreach ( preg_split( '/,(?:\s*(?=https?:\/\/|\/\/|\/[^\/])|\s+)/', $srcset ) as $url_and_descriptor ) {
 			// remove the (optional) descriptor
 			// https://developer.mozilla.org/en-US/docs/Web/HTML/Element/img#attr-srcset
-			$extracted_urls[] = trim( preg_replace( '/[\d\.]+[xw]\s*$/', '', $url_and_descriptor ) );
+			$url_without_descriptor = trim( preg_replace( '/[\d\.]+[xw]\s*$/', '', $url_and_descriptor ) );
+			// Check if the URL consists of only numbers - this fixes issue where SS detects srcset descriptor such as 100 150w as a URL which
+			// is then replaced with relative URL for current post, this creates 5-10 additional "URLs" to be exported per article
+			if ( preg_match( '/^\d+$/', trim( $url_without_descriptor ) ) ) {
+				// If it does, skip it
+				continue;
+			}
+
+			$extracted_urls[] = $url_without_descriptor;
 		}
 
 		return $extracted_urls;
+	}
+
+	/**
+	 * Process a data: URI containing CSS content
+	 *
+	 * Decodes the CSS content from the data URI, processes URLs within it,
+	 * and re-encodes it back to a data URI format.
+	 *
+	 * @param string $data_uri The data: URI containing CSS
+	 *
+	 * @return string The processed data: URI with URLs replaced
+	 */
+	private function process_data_uri_css( $data_uri ) {
+		// Parse the data URI format: data:[<mediatype>][;base64],<data>
+		// Example: data:text/css;charset=UTF-8,<css content>
+		// Or URL-encoded: data://text/css%3Bcharset%3DUTF-8,%0D%0A<encoded css>
+
+		// First, try to match the data URI pattern
+		if ( ! preg_match( '/^data:([^,]*),(.*)$/is', $data_uri, $matches ) ) {
+			// Try URL-encoded format (data://)
+			if ( preg_match( '/^data:\/\/([^,]*),(.*)$/is', $data_uri, $matches ) ) {
+				// URL-encoded format detected
+				$media_type  = urldecode( $matches[1] );
+				$css_content = urldecode( $matches[2] );
+
+				// Process URLs in the CSS content
+				$processed_css = $this->force_replace( $css_content );
+
+				// Re-encode and return
+				return 'data://' . urlencode( $media_type ) . ',' . urlencode( $processed_css );
+			}
+
+			return $data_uri; // Return unchanged if pattern doesn't match
+		}
+
+		$media_type  = $matches[1];
+		$css_content = $matches[2];
+		$is_base64   = false;
+
+		// Check if content is base64 encoded
+		if ( stripos( $media_type, ';base64' ) !== false ) {
+			$is_base64   = true;
+			$media_type  = str_ireplace( ';base64', '', $media_type );
+			$css_content = base64_decode( $css_content );
+		} else {
+			// URL-decode the content
+			$css_content = urldecode( $css_content );
+		}
+
+		// Process URLs in the CSS content using force_replace to handle origin URLs
+		$processed_css = $this->force_replace( $css_content );
+
+		// Re-encode the CSS content
+		if ( $is_base64 ) {
+			$encoded_css = base64_encode( $processed_css );
+
+			return 'data:' . $media_type . ';base64,' . $encoded_css;
+		} else {
+			// URL-encode the content, preserving the original format
+			$encoded_css = rawurlencode( $processed_css );
+
+			return 'data:' . $media_type . ',' . $encoded_css;
+		}
 	}
 
 	/**
@@ -442,94 +1428,198 @@ class Url_Extractor {
 	 * @return string The CSS with all URLs converted
 	 */
 	private function extract_and_replace_urls_in_css( $text ) {
-		$text     = html_entity_decode( $text );
-		$patterns = array(
-			"/url\(\s*[\"']?([^)\"']+)/", // url()
-			"/@import\s+[\"']([^\"']+)/"
-		); // @import w/o url()
-
-		foreach ( $patterns as $pattern ) {
-			$text = preg_replace_callback( $pattern, array( $this, 'css_matches' ), $text );
+		// Decode entities to ensure URLs are detected correctly, using site charset
+		$charset = \get_bloginfo( 'charset' );
+		if ( empty( $charset ) ) {
+			$charset = 'UTF-8';
 		}
+		$text = html_entity_decode( $text, ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE, $charset );
 
-		return $text;
-	}
+		// Pass 1: Handle url(...) constructs with quoted or unquoted values, including relative URLs.
+		// Pattern breakdown:
+		// - url( optional whitespace
+		// - capture optional quote (single or double) in group 1
+		// - capture the URL (anything but closing paren; we'll trim trailing whitespace) in group 2
+		// - match the same optional quote in group 3 via backreference
+		// - optional whitespace and closing paren
+		$text = preg_replace_callback(
+			'/url\(\s*(?:(["\'])\s*)?([^\)\s]+?)\s*(?:\1)?\s*\)/i',
+			function ( $m ) {
+				$quote = isset( $m[1] ) ? $m[1] : '';
+				$raw   = $m[2];
+				$val   = trim( $raw );
 
-	private function extract_and_replace_urls_in_script( $text ) {
-		if ( $this->is_json( $text ) ) {
-			$decoded_text = html_entity_decode( $text, ENT_NOQUOTES );
-		} else {
-			$decoded_text = html_entity_decode( $text );
+				// Skip data URIs or empty
+				if ( $val === '' || stripos( $val, 'data:' ) === 0 ) {
+					return $m[0];
+				}
+
+				$updated = $this->add_to_extracted_urls( $val );
+				if ( empty( $updated ) ) {
+					return $m[0];
+				}
+
+				// Reconstruct preserving original quote style if present
+				if ( $quote === '"' || $quote === "'" ) {
+					return 'url(' . $quote . $updated . $quote . ')';
+				}
+
+				return 'url(' . $updated . ')';
+			},
+			$text
+		);
+
+		// Pass 2: Fallback - replace any remaining bare local absolute or protocol-relative URLs by converting them.
+		$escaped_origin = preg_quote( Util::origin_host(), '/' );
+		$text           = preg_replace_callback(
+			'/((?:https?:)?\/\/' . $escaped_origin . ')[^"\')\s;,]+/i',
+			function ( $m ) {
+				$matched_url = $m[0];
+				$updated     = $this->add_to_extracted_urls( $matched_url );
+
+				return $updated ?: $matched_url;
+			},
+			$text
+		);
+
+		// Pass 3: Fix HTML numeric entities used inside CSS content strings (e.g., content: "&#61710;" from Elementor/EAEL)
+		// Browsers do not decode HTML entities inside CSS. Convert these to proper CSS escapes like \f10e.
+		if ( apply_filters( 'simply_static_fix_css_content_entities', true, $this->static_page, $this ) ) {
+			$text = $this->convert_css_content_entities_to_escapes( $text );
 		}
-
-		$decoded_text = apply_filters( 'simply_static_decoded_urls_in_script', $decoded_text, $this->static_page, $this );
-
-		$text = preg_replace( '/(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', $this->options->get_destination_url(), $decoded_text );
 
 		return $text;
 	}
 
 	/**
-	 * @param \ $tag
+	 * Convert HTML numeric entities within CSS content property string literals
+	 * into CSS escape sequences so icon fonts (e.g., Font Awesome) render correctly.
 	 *
-	 * @return array|string|string[]|null
+	 * Examples:
+	 *   content: "&#61710;"  => content: "\f10e"
+	 *   content: '\xF10E'    => unchanged
+	 *   content: "\f10e"    => unchanged
+	 *
+	 * Supports both decimal (&#61710;) and hexadecimal (&#xF10E; / &#Xf10e;).
 	 */
-	private function extract_and_replace_urls_in_script_inner_text( $tag ) {
+	private function convert_css_content_entities_to_escapes( string $css ): string {
+		// Only process quoted values of the content property to avoid false positives
+		return preg_replace_callback(
+			'/(content\s*:\s*)(["\'])((?:\\\\.|(?!\2).)*?)(\2)/is',
+			function ( $m ) {
+				$prefix = $m[1];
+				$quote  = $m[2];
+				$value  = $m[3];
 
-		$regex = '/(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i';
+				// If value already contains a CSS escape (e.g., \f10e), leave those intact
+				// Convert hex entities first: &#xHHHH; or &#Xhhhh;
+				$value = preg_replace_callback(
+					'/&#x([0-9a-fA-F]+);/i',
+					function ( $hm ) {
+						$hex = strtolower( $hm[1] );
 
+						// Ensure it is prefixed with a single backslash as a CSS escape
+						return '\\' . $hex;
+					},
+					$value
+				);
+
+				// Convert decimal entities: &#DDDDD;
+				$value = preg_replace_callback(
+					'/&#([0-9]+);/',
+					function ( $dm ) {
+						$dec = (int) $dm[1];
+						if ( $dec <= 0 ) {
+							return $dm[0];
+						}
+						$hex = dechex( $dec );
+
+						return '\\' . strtolower( $hex );
+					},
+					$value
+				);
+
+				return $prefix . $quote . $value . $quote;
+			},
+			$css
+		);
+	}
+
+	private function extract_and_replace_urls_in_script( $text ) {
+		$charset = \get_bloginfo( 'charset' );
+		if ( empty( $charset ) ) {
+			$charset = 'UTF-8';
+		}
+		if ( $this->is_valid_json( $text ) ) {
+			$decoded_text = html_entity_decode( $text, ENT_NOQUOTES | ENT_HTML5 | ENT_SUBSTITUTE, $charset );
+		} else {
+			$decoded_text = html_entity_decode( $text, ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE, $charset );
+		}
+
+		$decoded_text = apply_filters( 'simply_static_decoded_urls_in_script', $decoded_text, $this->static_page, $this );
+
+		// Check if this is an importmap script
+		$is_importmap = $this->is_valid_json( $decoded_text ) && strpos( $decoded_text, '"imports"' ) !== false;
+
+		// Get the appropriate replacement URL based on destination URL type
 		switch ( $this->options->get( 'destination_url_type' ) ) {
 			case 'absolute':
 				$convert_to = $this->options->get_destination_url();
 				break;
 			case 'relative':
-				// Adding \/? before end of regex pattern to convert url.com/ & url.com to relative path, ex. /path/.
-				$regex      = '/(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '\/?/i';
 				$convert_to = $this->options->get( 'relative_path' );
 				break;
 			default:
-				// Offline mode.
-				// Adding \/? before end of regex pattern to convert url.com/ & url.com to relative path, ex. /path/.
-				$regex      = '/(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '\/?/i';
+				// Offline mode
 				$convert_to = '/';
+
+				// For importmap scripts in offline mode, we need to add './' prefix
+				if ( $is_importmap ) {
+					$convert_to = './' . $convert_to;
+				}
 		}
 
-		if ( $this->is_json( $tag->innerhtmlKeep ) ) {
-			$decoded_text = html_entity_decode( $tag->innerhtmlKeep, ENT_NOQUOTES );
-		} else {
-			$decoded_text = html_entity_decode( $tag->innerhtmlKeep );
-		}
+		// Replace URLs in the script content
+		// First, replace protocol-relative URLs (//example.com)
+		$text = preg_replace( '/(["\'(])\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', '$1' . $convert_to, $decoded_text );
 
-		$decoded_text = apply_filters( 'simply_static_decoded_text_in_script', $decoded_text, $this->static_page, $convert_to, $tag, $this );
+		// Then replace absolute URLs (http://example.com or https://example.com)
+		$text = preg_replace( '/(["\'(])(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', '$1' . $convert_to, $text );
 
-		$tag->innerhtmlKeep = preg_replace( $regex, $convert_to, $decoded_text );
+		// Also replace JSON-encoded URLs
+		$text = str_replace( addcslashes( untrailingslashit( Util::origin_url() ), '/' ), addcslashes( untrailingslashit( $convert_to ), '/' ), $text );
 
-		return $tag;
+		// Replace URLs in sourceURL and sourceMappingURL comments (used for debugging)
+		// Handles both //# and //@ formats (the latter is deprecated but still used)
+		$text = preg_replace( '/(\/\/[#@]\s*(?:sourceURL|sourceMappingURL)\s*=\s*)(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', '$1' . $convert_to, $text );
+
+		return $text;
 	}
+
 
 	/**
 	 * Check whether a given string is a valid JSON representation.
 	 *
-	 * Copied from: WP CLI, https://github.com/wp-cli/wp-cli/blob/f3e4b0785aa3d3132ee73be30aedca8838a8fa06/php/utils.php#L1600-L1612
+	 * This is a legacy method, use is_valid_json() instead.
 	 *
 	 * @param string $argument String to evaluate.
 	 * @param bool $ignore_scalars Optional. Whether to ignore scalar values.
 	 *                               Defaults to true.
 	 *
 	 * @return bool Whether the provided string is a valid JSON representation.
+	 * @deprecated Use is_valid_json() instead
 	 */
 	protected function is_json( $argument, $ignore_scalars = true ) {
+		// For backward compatibility, maintain the original behavior
 		if ( ! is_string( $argument ) || '' === $argument ) {
 			return false;
 		}
-		$arg = $argument[0];
+
 		if ( $ignore_scalars && ! in_array( $argument[0], [ '{', '[' ], true ) ) {
 			return false;
 		}
 
-		json_decode( $argument, $assoc = true );
-
-		return json_last_error() === JSON_ERROR_NONE;
+		return $this->is_valid_json( $argument );
 	}
 
 	/**
@@ -560,10 +1650,26 @@ class Url_Extractor {
 	 */
 	private function extract_and_replace_urls_in_xml() {
 		$xml_string = $this->get_body();
-		// match anything starting with http/s plus all following characters
-		// except: [space] " ' <
-		$pattern = "/https?:\/\/[^\s\"'<]+/";
+
+		// Updated pattern to match both http/https URLs and protocol-relative URLs (starting with //)
+		$pattern = "/(https?:\/\/|\/\/)[^\s\"'<]+?(?=(\s|\"|'|<|$|]]>))/";
 		$text    = preg_replace_callback( $pattern, array( $this, 'xml_matches' ), $xml_string );
+
+		return $text;
+	}
+
+	/**
+	 * Use regex to extract URLs from JSON files (e.g. /feed/)
+	 * @return string The JSON with all the URLs converted
+	 */
+	private function extract_and_replace_urls_in_json() {
+		$json_string = $this->get_body();
+		// match anything starting with http/s or // plus all following characters
+		// except: [space] " ' <
+		$pattern = '/(?:https?:)?\/\/[^\s"\'\<\>]+/';
+
+
+		$text = preg_replace_callback( $pattern, array( $this, 'json_matches' ), $json_string );
 
 		return $text;
 	}
@@ -579,6 +1685,26 @@ class Url_Extractor {
 	 * @return string         The extracted, converted URL
 	 */
 	private function xml_matches( $matches ) {
+		$extracted_url = $matches[0];
+
+		if ( isset( $extracted_url ) && $extracted_url !== '' ) {
+			$updated_extracted_url = $this->add_to_extracted_urls( $extracted_url );
+		}
+
+		return $updated_extracted_url;
+	}
+
+	/**
+	 * Callback function for preg_replace in extract_and_replace_urls_in_json
+	 *
+	 * Takes the match, adds it to the list of URLs, converts the URL to a
+	 * destination URL.
+	 *
+	 * @param array $matches Array of regex matches found in the JSON file
+	 *
+	 * @return string         The extracted, converted URL
+	 */
+	private function json_matches( $matches ) {
 		$extracted_url = $matches[0];
 
 		if ( isset( $extracted_url ) && $extracted_url !== '' ) {
@@ -606,14 +1732,21 @@ class Url_Extractor {
 	public function add_to_extracted_urls( $extracted_url ) {
 		$url = Util::relative_to_absolute_url( $extracted_url, $this->static_page->url );
 
+		// Normalize URL to handle posts with URL-encoded post_name values
+		if ( $url ) {
+			$url = Util::normalize_url( $url );
+		}
+
 		if ( $url && Util::is_local_url( $url ) ) {
-			// add to extracted urls queue
-			$this->extracted_urls[] = apply_filters(
-				'simply_static_extracted_url',
-				Util::remove_params_and_fragment( $url ),
-				$url,
-				$this->static_page
-			);
+			// Only add to extracted urls queue if smart_crawl is not enabled
+			if ( ! $this->options->get( 'smart_crawl' ) ) {
+				$this->extracted_urls[] = apply_filters(
+					'simply_static_extracted_url',
+					Util::remove_params_and_fragment( $url ),
+					$url,
+					$this->static_page
+				);
+			}
 
 			$url = $this->convert_url( $url );
 		}
@@ -628,7 +1761,7 @@ class Url_Extractor {
 	 *
 	 * @return string      Converted URL
 	 */
-	private function convert_url( $url ) {
+	public function convert_url( $url ) {
 
 		$url = apply_filters( 'simply_static_pre_converted_url', $url, $this->static_page, $this );
 
@@ -654,8 +1787,13 @@ class Url_Extractor {
 	 */
 	private function convert_absolute_url( $url ) {
 		$destination_url = $this->options->get_destination_url();
-		$url             = Util::strip_protocol_from_url( $url );
-		$url             = str_replace( Util::origin_host(), $destination_url, $url );
+
+		if ( Util::is_local_url( $url ) ) {
+			$path           = Util::get_path_from_local_url( $url );
+			$sanitized_path = Util::sanitize_local_path( $path );
+
+			return untrailingslashit( $destination_url ) . $sanitized_path;
+		}
 
 		return $url;
 	}
@@ -668,10 +1806,10 @@ class Url_Extractor {
 	 * @return string      Relative path for the URL
 	 */
 	private function convert_relative_url( $url ) {
-		$url = Util::get_path_from_local_url( $url );
-		$url = $this->options->get( 'relative_path' ) . $url;
+		$path           = Util::get_path_from_local_url( $url );
+		$sanitized_path = Util::sanitize_local_path( $path );
 
-		return $url;
+		return $this->options->get( 'relative_path' ) . $sanitized_path;
 	}
 
 	/**
@@ -693,11 +1831,14 @@ class Url_Extractor {
 	 */
 	private function convert_offline_url( $url ) {
 		// remove the scheme/host from the url
-		$page_path      = Util::get_path_from_local_url( $this->static_page->url );
-		$extracted_path = Util::get_path_from_local_url( $url );
+		$page_path           = Util::get_path_from_local_url( $this->static_page->url );
+		$sanitized_page_path = Util::sanitize_local_path( $page_path );
+
+		$extracted_path           = Util::get_path_from_local_url( $url );
+		$sanitized_extracted_path = Util::sanitize_local_path( $extracted_path );
 
 		// create a path from one page to the other
-		$path = Util::create_offline_path( $extracted_path, $page_path );
+		$path = Util::create_offline_path( $sanitized_extracted_path, $sanitized_page_path );
 
 		$path_info = Util::url_path_info( $url );
 		if ( $path_info['extension'] === '' ) {

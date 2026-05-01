@@ -55,6 +55,7 @@ class Diagnostic {
 				__( 'Basic Auth', 'simply-static' )  => $this->check_basic_auth_status(),
 				__( 'php-xml', 'simply-static' )     => $this->is_xml_active(),
 				__( 'cURL', 'simply-static' )        => $this->has_curl(),
+				__( 'Docker', 'simply-static' ) => $this->docker_environment_check(),
 			),
 			'WordPress'  => array(
 				__( 'Permalinks', 'simply-static' ) => $this->is_permalink_structure_set(),
@@ -103,7 +104,7 @@ class Diagnostic {
 
 		// Check for incompatible plugins.
 		$plugins           = get_plugins();
-		$active_plugins    = get_option( 'active_plugins' );
+		$active_plugins    = Util::get_all_active_plugins();
 		$plugin_count      = 0;
 		$activated_plugins = array();
 
@@ -132,7 +133,7 @@ class Diagnostic {
 
 		// Set transient for checks.
 		if ( ! get_transient( 'simply_static_checks' ) ) {
-			set_transient( 'simply_static_checks', $this->checks, MINUTE_IN_SECONDS );
+			set_transient( 'simply_static_checks', $this->checks, 5 * MINUTE_IN_SECONDS );
 		}
 
 		// Set transient for failed tests.
@@ -146,7 +147,7 @@ class Diagnostic {
 					}
 				}
 			}
-			set_transient( 'simply_static_failed_tests', $failed_tests, MINUTE_IN_SECONDS );
+			set_transient( 'simply_static_failed_tests', $failed_tests, 5 * MINUTE_IN_SECONDS );
 		}
 	}
 
@@ -213,7 +214,9 @@ class Diagnostic {
 	}
 
 	public function is_wp_cron_running() {
-		if ( ! defined( 'DISABLE_WP_CRON' ) || DISABLE_WP_CRON !== true || defined( 'SS_CRON' ) ) {
+		$server_cron = $this->options->get( 'server_cron' );
+
+		if ( ! defined( 'DISABLE_WP_CRON' ) || DISABLE_WP_CRON !== true || defined( 'SS_CRON' ) || $server_cron ) {
 			$is_cron = true;
 		} else {
 			$is_cron = false;
@@ -235,74 +238,78 @@ class Diagnostic {
 			'error'       => __( 'Please disable caching before running a static export', 'simply-static' ),
 		);
 
+		if ( ! function_exists( 'is_plugin_active' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
 		// W3 Total Cache.
-		if ( defined( 'W3TC_VERSION' ) && in_array( 'w3-total-cache', $incompatible_plugins ) ) {
+		if ( defined( 'W3TC_VERSION' ) && is_plugin_active( 'w3-total-cache/w3-total-cache.php' ) && in_array( 'w3-total-cache', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'W3 Total Cache' ) );
 		}
 
 		// WP Fastest Cache.
-		if ( defined( 'WPFC_WP_PLUGIN_DIR' ) && in_array( 'wp-fastest-cache', $incompatible_plugins ) ) {
+		if ( defined( 'WPFC_WP_PLUGIN_DIR' ) && is_plugin_active( 'wp-fastest-cache/wpFastestCache.php' ) && in_array( 'wp-fastest-cache', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'WP Fastest Cache' ) );
 		}
 
 		// WP Rocket.
-		if ( defined( 'WP_ROCKET_VERSION' ) && in_array( 'wp-rocket', $incompatible_plugins ) ) {
+		if ( defined( 'WP_ROCKET_VERSION' ) && is_plugin_active( 'wp-rocket/wp-rocket.php' ) && in_array( 'wp-rocket', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'WP Rocket' ) );
 		}
 
 		// Litespeed Cache.
-		if ( defined( 'LSCWP_V' ) && in_array( 'litespeed-cache', $incompatible_plugins ) ) {
+		if ( defined( 'LSCWP_V' ) && is_plugin_active( 'litespeed-cache/litespeed-cache.php' ) && in_array( 'litespeed-cache', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'LiteSpeed Cache' ) );
 		}
 
 		// Speed Optimizer (Siteground)
-		if ( defined( 'SiteGround_Optimizer\VERSION' ) && in_array( 'sg-cachepress', $incompatible_plugins ) ) {
+		if ( defined( 'SiteGround_Optimizer\VERSION' ) && is_plugin_active( 'sg-cachepress/sg-cachepress.php' ) && in_array( 'sg-cachepress', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'Speed Optimizer' ) );
 		}
 
 		// WP Super Cache.
-		if ( defined( 'WPSC_VERSION' ) && in_array( 'wp-super-cache', $incompatible_plugins ) ) {
+		if ( defined( 'WPSC_VERSION' ) && is_plugin_active( 'wp-super-cache/wp-cache.php' ) && in_array( 'wp-super-cache', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'WP Super Cache' ) );
 		}
 
 		// Hummingbird.
-		if ( defined( 'WPHB_VERSION' ) && in_array( 'hummingbird-performance', $incompatible_plugins ) ) {
+		if ( defined( 'WPHB_VERSION' ) && is_plugin_active( 'hummingbird-performance/wp-hummingbird.php' ) && in_array( 'hummingbird-performance', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'Hummingbird' ) );
 		}
 
 		// Autoptimize.
-		if ( defined( 'AUTOPTIMIZE_PLUGIN_VERSION' ) && in_array( 'autoptimize', $incompatible_plugins ) ) {
+		if ( defined( 'AUTOPTIMIZE_PLUGIN_VERSION' ) && is_plugin_active( 'autoptimize/autoptimize.php' ) && in_array( 'autoptimize', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'Autoptimize' ) );
 		}
 
 		// Breeze (Cloudways)
-		if ( defined( 'BREEZE_VERSION' ) && in_array( 'breeze', $incompatible_plugins ) ) {
+		if ( defined( 'BREEZE_VERSION' ) && is_plugin_active( 'breeze/breeze.php' ) && in_array( 'breeze', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'Breeze' ) );
 		}
 
 		// Cache Enabler.
-		if ( defined( 'CACHE_ENABLER_VERSION' ) && in_array( 'cache-enabler', $incompatible_plugins ) ) {
+		if ( defined( 'CACHE_ENABLER_VERSION' ) && is_plugin_active( 'cache-enabler/cache-enabler.php' ) && in_array( 'cache-enabler', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'Cache Enabler' ) );
 		}
 
 		// Redis Object Cache.
-		if ( defined( 'WP_REDIS_VERSION' ) && in_array( 'wp-redis', $incompatible_plugins ) ) {
+		if ( defined( 'WP_REDIS_VERSION' ) && is_plugin_active( 'redis-cache/redis-cache.php' ) && in_array( 'wp-redis', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'Redis Object Cache' ) );
 		}
 
 		// Cloudflare.
-		if ( defined( 'CLOUDFLARE_PLUGIN_DIR' ) && in_array( 'cloudflare', $incompatible_plugins ) ) {
+		if ( defined( 'CLOUDFLARE_PLUGIN_DIR' ) && is_plugin_active( 'cloudflare/cloudflare.php' ) && in_array( 'cloudflare', $incompatible_plugins ) ) {
 			$response['test']  = false;
 			$response['error'] = sprintf( esc_html__( 'Please disable caching (%s) before running a static export.', 'simply-static' ), esc_html( 'Cloudflare' ) );
 		}
@@ -341,7 +348,6 @@ class Diagnostic {
 			'booking-system',
 			'yet-another-stars-rating',
 			'mailpoet',
-			'the-events-calendar',
 			'buddypress',
 			'lifterlms',
 			'wp-job-manager',
@@ -357,7 +363,6 @@ class Diagnostic {
 			'paid-memberships-pro',
 			'wp-members',
 			'wp-private-content-plus',
-			'forminator',
 			'catch-infinite-scroll',
 			'ultimate-post',
 			'facetwp',
@@ -505,6 +510,81 @@ class Diagnostic {
 		);
 	}
 
+	/**
+	 * Detect Docker environment and flag common URL misconfiguration.
+	 *
+	 * Many users run WordPress via Docker and access it on the host with a non-standard port
+	 * like http://localhost:8000. From inside the container, that URL is not reachable.
+	 * This check warns in that scenario and links to our docs with the fix.
+	 *
+	 * @return array
+	 */
+	public function docker_environment_check() {
+		// Best-effort Docker detection.
+		$is_docker = file_exists( '/.dockerenv' ) || getenv( 'DOCKER_CONTAINER' ) || getenv( 'AM_I_IN_A_DOCKER_CONTAINER' );
+
+		// If not Docker, pass the check.
+		if ( ! $is_docker ) {
+			return array(
+				'test'        => true,
+				'description' => __( 'Docker not detected', 'simply-static' ),
+				'error'       => __( 'Docker misconfiguration detected', 'simply-static' ), // never shown when test is true
+			);
+		}
+
+		$home   = home_url();
+		$parsed = wp_parse_url( $home );
+		$host   = isset( $parsed['host'] ) ? $parsed['host'] : '';
+		$scheme = isset( $parsed['scheme'] ) ? $parsed['scheme'] : 'http';
+		$port   = isset( $parsed['port'] ) ? intval( $parsed['port'] ) : ( $scheme === 'https' ? 443 : 80 );
+		$server_port = isset( $_SERVER['SERVER_PORT'] ) ? intval( $_SERVER['SERVER_PORT'] ) : null;
+
+		$docs_url = 'https://docs.simplystatic.com/article/151-working-with-docker-environments';
+		$docs_url = esc_url( $docs_url );
+
+		$likely_misconfig = false;
+		$error_message    = '';
+
+		// Typical problematic setup: site is configured as localhost with a non-standard port
+		// which is only available on the host, not from inside the container.
+		if ( in_array( $host, array( 'localhost', '127.0.0.1' ), true ) && ! in_array( $port, array( 80, 443 ), true ) ) {
+			$likely_misconfig = true;
+			$error_message    = sprintf(
+			/* translators: 1: current site url, 2: example of host.docker.internal with port, 3: docs url */
+				__( 'Your WordPress Address appears to be %1$s which is usually not reachable from inside the container. Consider using %2$s (and map host.docker.internal), or the container service name, or adjust your Site URL. See instructions: %3$s', 'simply-static' ),
+				esc_url( $home ),
+				esc_html( sprintf( '%s://host.docker.internal:%d', $scheme, $port ) ),
+				$docs_url
+			);
+		}
+
+		// Another hint: localhost with a different server port.
+		if ( ! $likely_misconfig && in_array( $host, array( 'localhost', '127.0.0.1' ), true ) && $server_port && $port !== $server_port ) {
+			$likely_misconfig = true;
+			$error_message    = sprintf(
+			/* translators: 1: current site url, 2: server port, 3: docs url */
+				__( 'Site URL %1$s uses a different port than the web server (%2$d). This is often unreachable from within the container. See Docker guide: %3$s', 'simply-static' ),
+				esc_url( $home ),
+				$server_port,
+				$docs_url
+			);
+		}
+
+		if ( $likely_misconfig ) {
+			return array(
+				'test'        => false,
+				'description' => __( 'Site URL looks reachable.', 'simply-static' ), // not shown when test is false
+				'error'       => $error_message,
+			);
+		}
+
+		return array(
+			'test'        => true,
+			'description' => __( 'Site URL looks fine for container access.', 'simply-static' ),
+			'error'       => sprintf( __( 'If exports fail, please review: %s', 'simply-static' ), $docs_url ),
+		);
+	}
+
 	public function check_basic_auth_status() {
 		$test    = true;
 		$message = __( 'Basic Auth is not enabled.', 'simply-static' );
@@ -515,17 +595,17 @@ class Diagnostic {
 
 		switch ( $server_type ) {
 			case ( strpos( $server_type, 'Apache' ) !== false ) :
-				if ( isset( $_SERVER['PHP_AUTH_USER'] ) ) {
+				if ( isset( $_SERVER['PHP_AUTH_USER'] ) && ! empty( $_SERVER['PHP_AUTH_USER'] ) ) {
 					$basic_auth_on = true;
 				}
 				break;
 			case ( strpos( $server_type, 'nginx' ) !== false ) :
-				if ( isset( $_SERVER['REMOTE_USER'] ) ) {
+				if ( isset( $_SERVER['REMOTE_USER'] ) && ! empty( $_SERVER['REMOTE_USER'] ) ) {
 					$basic_auth_on = true;
 				}
 				break;
 			case ( strpos( $server_type, 'IIS' ) !== false ) :
-				if ( isset( $_SERVER['AUTH_USER'] ) ) {
+				if ( isset( $_SERVER['AUTH_USER'] ) && ! empty( $_SERVER['AUTH_USER'] ) ) {
 					$basic_auth_on = true;
 				}
 				break;

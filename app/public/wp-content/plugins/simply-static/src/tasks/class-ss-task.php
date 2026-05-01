@@ -16,7 +16,7 @@ abstract class Task {
 	/**
 	 * An instance of the options structure containing all options for this plugin.
 	 *
-	 * @var Simply_Static\Options
+	 * @var \Simply_Static\Options
 	 */
 	protected $options = null;
 
@@ -54,6 +54,15 @@ abstract class Task {
         }
 	}
 
+	/**
+	 * @unused
+	 * @deprecated Not used anymore.
+	 *
+	 * @param $pages_remaining
+	 * @param $pages_total
+	 *
+	 * @return void
+	 */
 	protected function save_pages_status( $pages_remaining, $pages_total ) {
 		Util::debug_log( '[PAGES STATUS] Remaining:' . $pages_remaining . '; Total: ' . $pages_total );
 
@@ -71,4 +80,14 @@ abstract class Task {
     protected function is_wp_cli_running() {
         return defined( 'WP_CLI' ) && WP_CLI;
     }
+
+	protected function check_if_running() {
+		if ( Plugin::instance()->get_archive_creation_job()->is_paused() ) {
+			throw new Pause_Exception( 'Job paused' );
+		}
+
+		if ( Plugin::instance()->get_archive_creation_job()->is_cancelled() ) {
+			throw new Pause_Exception( 'Job cancelled' );
+		}
+	}
 }
